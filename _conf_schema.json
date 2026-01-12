@@ -1,0 +1,102 @@
+{
+  "enable": {
+    "type": "bool",
+    "default": true,
+    "description": "启用插件"
+  },
+  "trigger_probability": {
+    "type": "float",
+    "default": 0.3,
+    "description": "触发语音的概率 (0-1)"
+  },
+  "min_text_length": {
+    "type": "int",
+    "default": 2,
+    "description": "最短文本长度"
+  },
+  "max_saved_audios": {
+    "type": "int",
+    "default": 20,
+    "description": "最大保存音频文件数，-1表示不限制，0表示不保存"
+  },
+  "dashscope": {
+    "type": "object",
+    "description": "Dashscope (阿里云百炼) TTS 配置",
+    "items": {
+      "api_key": {
+        "type": "string",
+        "default": "",
+        "description": "Dashscope API Key"
+      },
+      "model": {
+        "type": "string",
+        "default": "cosyvoice-v3-flash",
+        "description": "模型名称 (如： cosyvoice-v3-flash)"
+      },
+      "backend": {
+        "type": "string",
+        "default": "cosy",
+        "description": "qwen / cosy",
+        "options": ["qwen", "cosy"]
+      },
+      "qwen_voice": {
+        "type": "string",
+        "default": "",
+        "description": "Qwen3-TTS 音色或自定义音色 ID"
+      },
+      "cosy_voice": {
+        "type": "string",
+        "default": "",
+        "description": "CosyVoice 音色或自定义音色 ID"
+      }
+    }
+  },
+  "preprocess": {
+    "type": "object",
+    "description": "语音前文本预处理 (翻译/清洗)",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "default": false,
+        "description": "启用预处理"
+      },
+      "target_language": {
+        "type": "string",
+        "default": "中文",
+        "description": "翻译目标语言"
+      },
+      "provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "用于预处理的 LLM Provider ID",
+        "_special": "select_provider"
+      },
+      "prompt": {
+        "type": "text",
+        "default": "请将以下文本翻译为 {target_language}：\n\n{text}",
+        "description": "自定义提示词 (支持 {text}/{target_language})"
+      }
+    }
+  },
+  "ffmpeg": {
+    "type": "object",
+    "description": "FFmpeg 配置",
+    "items": {
+      "path": {
+        "type": "string",
+        "default": "",
+        "description": "FFmpeg 可执行文件路径"
+      },
+      "auto_download": {
+        "type": "bool",
+        "default": true,
+        "description": "自动下载 FFmpeg"
+      },
+      "download_mirror": {
+        "type": "string",
+        "default": "github",
+        "description": "下载镜像源"
+      }
+    }
+  }
+}
