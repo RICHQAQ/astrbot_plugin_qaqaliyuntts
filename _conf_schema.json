@@ -77,26 +77,5 @@
         "description": "自定义提示词 (支持 {text}/{target_language})"
       }
     }
-  },
-  "ffmpeg": {
-    "type": "object",
-    "description": "FFmpeg 配置",
-    "items": {
-      "path": {
-        "type": "string",
-        "default": "",
-        "description": "FFmpeg 可执行文件路径"
-      },
-      "auto_download": {
-        "type": "bool",
-        "default": true,
-        "description": "自动下载 FFmpeg"
-      },
-      "download_mirror": {
-        "type": "string",
-        "default": "github",
-        "description": "下载镜像源"
-      }
-    }
   }
 }

@@ -56,6 +56,7 @@ class QAQAliyunttsPlugin(Star):
 
     @filter.on_decorating_result()
     async def send_tts(self, event: AstrMessageEvent):
+        """处理消息并进行语音合成。"""
         if not self.enable:
             return
         result = event.get_result()

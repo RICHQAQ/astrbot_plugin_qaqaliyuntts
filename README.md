@@ -1,5 +1,7 @@
 ## QAQ Aliyun TTS 插件
 
+> 暂未完善
+
 阿里云百炼（Dashscope）TTS 语音合成插件，支持 CosyVoice 模型，生成音频后自动以语音消息发送。
 
 ## 功能
