@@ -60,6 +60,16 @@
         "default": false,
         "description": "启用预处理"
       },
+      "enable_SSML":{
+        "type": "bool",
+        "default": false,
+        "description": "启用 SSML 标签, 提升语音效果"
+      },
+      "SSML_history_length":{
+        "type": "int",
+        "default": 20,
+        "description": "SSML 历史长度，用于上下文记忆"
+      },
       "target_language": {
         "type": "string",
         "default": "中文",
@@ -74,7 +84,17 @@
       "prompt": {
         "type": "text",
         "default": "请将以下文本翻译为 {target_language}：\n\n{text}",
-        "description": "自定义提示词 (支持 {text}/{target_language})"
+        "description": "翻译自定义提示词 (支持 {text}/{target_language})"
+      },
+      "SSML_prompt": {
+        "type": "text",
+        "default": "<history>\n{history}\n</history>\n\n<rule>\n【必须遵守的 SSML 规则）】\n\n1. 所有内容必须在 <speak></speak> 内；可用一个或者多个<speak>达到复杂的组合，不要嵌套 <speak>。\n2. 只能使用以下标签：<speak>, <break/>, <sub>, <phoneme>, 其他一律禁止。\n3. <speak> 允许的属性只有这些（其余禁止）：\n\n   * rate：语速，尽量较小变化，取值为 [0.5,2] 的小数，例如 0.9 / 1 / 1.05 / 1.1 / 1.1005\n   * pitch：音高，尽量较小变化，取值为 [0.5,2] 的小数，例如 0.9 / 1 / 1.05 / 1.1 / 1.1005\n   * volume：音量，取值为 [0,100] 的整数，例如 40 / 50 / 80\n   * effect：可选音效（robot/lolita/lowpass/echo/eq/lpfilter/hpfilter）\n   * effectValue：当 effect 为 eq/lpfilter/hpfilter 时按规范填写\n\n4. <break time=\"...\"/> 只允许：\n\n   * 秒：1s~10s 的整数秒\n   * 毫秒：50ms~10000ms 的整数毫秒\n     连续 break 总时长不要超过 10s（超过会被截断）。\n5. <phoneme alphabet=\"string\" ph=\"string\">文本</phoneme> :\n   * alphabet 只允许 \n      - \"py\"：拼音\n      - \"cmu\"：音标\n   * ph : 指定具体的拼音或音标,字与字的拼音用空格分隔，拼音的数目必须与字数一致,每个拼音由发音部分和音调组成，其中音调为 1 到 5 的整数，5 表示轻声。\n   ```xml\n   <speak>\n   去<phoneme alphabet=\"py\" ph=\"dian3 dang4 hang2\">典当行</phoneme>把这个玩意<phoneme alphabet=\"py\" ph=\"dang4 diao4\">当掉</phoneme>\n   </speak>\n\n   <speak>\n   How to spell <phoneme alphabet=\"cmu\" ph=\"S AY N\">sin</phoneme>?\n   </speak>\n   ```\n6. <sub alias=\"string\"></sub> :\n   * alias：将某段文本替换为更适合朗读的文本。\n   如：将 “W3C” 读成 “网络协议标准”\n   ```xml\n   <speak>\n      <sub alias=\"网络协议标准\">W3C</sub>\n   </speak>\n   ```\n5. XML 特殊字符必须转义：& -> &  < -> <  > -> >  \" -> \"  ' -> '\n6. 避免输出 emoji / 特殊符号（如 🔥），必要时改为文字表达（例如“火焰”）。\n</rule>\n\n请将以下文本翻译为 {target_language}并为其添加适合语音合成的 SSML 格式，提升语音效果：\n\n{text}\n\n严格确保输出格式仅为```xml包裹，如：\n```xml\n<speak>\n...SSML内容...\n</speak>\n<speak>\n...SSML内容...\n</speak>\n```",
+        "description": "SSML 自定义提示词 (支持 {text}/{target_language}/{history})，会覆盖翻译prompt"
+      },
+      "SSML_regex": {
+        "type": "text",
+        "default": "```xml\\s*([\\s\\S]*?)\\s*```",
+        "description": "用于提取 SSML 内容的正则表达式"
       }
     }
   }

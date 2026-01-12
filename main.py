@@ -1,4 +1,5 @@
 import base64
+import re
 from os import path
 import os
 from pathlib import Path
@@ -16,6 +17,72 @@ from dashscope.audio.tts_v2 import AudioFormat as SpeechSynthesizerAudioFormat
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 import astrbot.api.message_components as Comp
 from dashscope.audio.qwen_tts_realtime import QwenTtsRealtime, QwenTtsRealtimeCallback, AudioFormat
+from collections import defaultdict, deque
+
+SSML_PROMPOT_TEMPLATE = r"""
+<history>
+{history}
+</history>
+
+<rule>
+【必须遵守的 SSML 规则）】
+
+1. 所有内容必须在 <speak></speak> 内；可用一个或者多个<speak>达到复杂的组合，不要嵌套 <speak>。
+2. 只能使用以下标签：<speak>, <break/>, <sub>, <phoneme>, 其他一律禁止。
+3. <speak> 允许的属性只有这些（其余禁止）：
+
+   * rate：语速，尽量较小变化，取值为 [0.5,2] 的小数，例如 0.9 / 1 / 1.05 / 1.1 / 1.1005
+   * pitch：音高，尽量较小变化，取值为 [0.5,2] 的小数，例如 0.9 / 1 / 1.05 / 1.1 / 1.1005
+   * volume：音量，取值为 [0,100] 的整数，例如 40 / 50 / 80
+   * effect：可选音效（robot/lolita/lowpass/echo/eq/lpfilter/hpfilter）
+   * effectValue：当 effect 为 eq/lpfilter/hpfilter 时按规范填写
+
+4. <break time="..."/> 只允许：
+
+   * 秒：1s~10s 的整数秒
+   * 毫秒：50ms~10000ms 的整数毫秒
+     连续 break 总时长不要超过 10s（超过会被截断）。
+5. <phoneme alphabet="string" ph="string">文本</phoneme> :
+   * alphabet 只允许 
+      - "py"：拼音
+      - "cmu"：音标
+   * ph : 指定具体的拼音或音标,字与字的拼音用空格分隔，拼音的数目必须与字数一致,每个拼音由发音部分和音调组成，其中音调为 1 到 5 的整数，5 表示轻声。
+   ```xml
+   <speak>
+   去<phoneme alphabet="py" ph="dian3 dang4 hang2">典当行</phoneme>把这个玩意<phoneme alphabet="py" ph="dang4 diao4">当掉</phoneme>
+   </speak>
+
+   <speak>
+   How to spell <phoneme alphabet="cmu" ph="S AY N">sin</phoneme>?
+   </speak>
+   ```
+6. <sub alias="string"></sub> :
+   * alias：将某段文本替换为更适合朗读的文本。
+   如：将 “W3C” 读成 “网络协议标准”
+   ```xml
+   <speak>
+      <sub alias="网络协议标准">W3C</sub>
+   </speak>
+   ```
+5. XML 特殊字符必须转义：& -> &  < -> <  > -> >  " -> "  ' -> '
+6. 避免输出 emoji / 特殊符号（如 🔥），必要时改为文字表达（例如“火焰”）。
+</rule>
+
+请将以下文本翻译为 {target_language}并为其添加适合语音合成的 SSML 格式，提升语音效果：
+
+{text}
+
+严格确保输出格式仅为```xml包裹，如：
+```xml
+<speak>
+...SSML内容...
+</speak>
+<speak>
+...SSML内容...
+</speak>
+```
+"""
+
 
 class QAQAliyunttsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -54,14 +121,35 @@ class QAQAliyunttsPlugin(Star):
         self.preprocess_system_prompt = self.preprocess_config.get("system_prompt", "")
         self.preprocess_target_language = self.preprocess_config.get("target_language", "中文")
         self.prompt_template = self.preprocess_config.get("prompt", "请将以下文本翻译为 {target_language}：\n\n{text}")
+        self.enable_SSML = self.preprocess_config.get("enable_SSML", False)
+        self.SSML_prompt = self.preprocess_config.get("SSML_prompt", SSML_PROMPOT_TEMPLATE)
+        self.SSML_history_length = self.preprocess_config.get("SSML_history_length", 20)
+        self.SSML_regex = self.preprocess_config.get("SSML_regex", r"```xml\s*([\s\S]*?)\s*```")
+
+        self.hist = defaultdict(lambda: deque(maxlen=self.SSML_history_length))
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
         pass
 
+    @filter.event_message_type(filter.EventMessageType.ALL)  # 收到用户消息时
+    async def record_incoming(self, event: AstrMessageEvent):
+        sid = event.message_obj.session_id
+        user_text = event.get_message_outline()
+        send = (event.message_obj.sender.user_id, event.message_obj.sender.nickname, user_text)
+        if user_text:
+            self.hist[sid].append(("user", send))
+
     @filter.on_decorating_result()
     async def send_tts(self, event: AstrMessageEvent):
         """处理消息并进行语音合成。"""
+        sid = event.message_obj.session_id
+        result = event.get_result()
+        if not result:
+            return
+        text = result.get_plain_text()
+        send = (event.message_obj.sender.user_id, event.message_obj.sender.nickname, text)
+        self.hist[sid].append(("robot", send))
         if not self.enable:
             return
         if self.trigger_probability < 1.0:
@@ -70,17 +158,18 @@ class QAQAliyunttsPlugin(Star):
             if rand_val > self.trigger_probability:
                 logger.info(f"[astrbot_plugin_qaqaliyuntts] 未触发语音合成，随机值：{rand_val:.4f}，触发概率：{self.trigger_probability}")
                 return
-        result = event.get_result()
-        if not result:
-            return
         # chain = result.chain
         logger.info("[astrbot_plugin_qaqaliyuntts] 开始处理消息，进行语音合成")
-        text = result.get_plain_text()
+        
         if not text or len(text) < self.min_text_length:
             logger.info(f"[astrbot_plugin_qaqaliyuntts] 文本长度不足，跳过语音合成，文本长度：{len(text) if text else 0}")
             return
         if self.enable_preprocess:
-            text = await self.clean_text_by_ai(text)
+            text = await self.clean_text_by_ai(text, session_id=sid)
+        # 如果正则提取失败（或被清洗成空），就不继续
+        if not text or not text.strip():
+            logger.info("[astrbot_plugin_qaqaliyuntts] 预处理结果为空/SSML提取失败，跳过语音合成")
+            return
         logger.info(f"[astrbot_plugin_qaqaliyuntts] 预处理后的文本：{text}")
         wav_path = self.get_wav_by_tts(text)
         logger.info(f"[astrbot_plugin_qaqaliyuntts] 语音合成完成，音频文件路径：{wav_path}")
@@ -115,17 +204,57 @@ class QAQAliyunttsPlugin(Star):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
         pass
 
-    async def clean_text_by_ai(self, text: str) -> str:
+    async def clean_text_by_ai(self, text: str, **kwargs) -> str:
         """使用 LLM 对文本进行预处理，返回处理后的文本。"""
         usr_prompt = self.prompt_template.format(
             text=text,
             target_language=self.preprocess_target_language,
         )
-        logger.info(f"[astrbot_plugin_qaqaliyuntts] 预处理提示词：\n{usr_prompt}")
+        if self.enable_SSML:
+            sid = kwargs.get("session_id", "")
+            items = self.hist.get(sid, [])
+            items = list(items)[:-1]  # 排除最后一句
+
+            history = []
+            for role, (user_id, nickname, msg_text) in items:
+                if role == "user":
+                    history.append(f"{nickname}（{user_id}）：\n{msg_text}")
+                else:
+                    history.append(f"assistant: \n{msg_text}")
+
+            usr_prompt = self.SSML_prompt.format(
+                history="\n".join(history),
+                text=text,
+                target_language=self.preprocess_target_language,
+            )
+        # logger.info(f"[astrbot_plugin_qaqaliyuntts] 预处理提示词：\n{usr_prompt}")
         llm_resp = await self.context.llm_generate(
             chat_provider_id=self.preprocess_provider_id,
             prompt=usr_prompt,
         )
+        logger.info(f"[astrbot_plugin_qaqaliyuntts] 预处理 LLM 输出：\n{llm_resp.completion_text}")
+        # 开启 SSML 时：必须命中正则，否则不继续
+        if self.enable_SSML:
+            out = (llm_resp.completion_text or "").strip()
+            try:
+                m = re.search(self.SSML_regex, out)
+            except re.error as e:
+                logger.error(f"[astrbot_plugin_qaqaliyuntts] SSML_regex 无效：{e}")
+                return ""
+            
+            if not m:
+                logger.info("[astrbot_plugin_qaqaliyuntts] 正则未命中任何 SSML 内容，终止后续流程")
+                return ""
+
+            ssml_block = (m.group(1) if m.lastindex else m.group(0)).strip()
+            if ssml_block.startswith("```"):
+                ssml_block = re.sub(r"^```(?:xml)?\s*", "", ssml_block)
+                ssml_block = re.sub(r"\s*```$", "", ssml_block)
+            # 额外兜底：确保最终至少包含 <speak>...</speak>
+            if "<speak" not in ssml_block or "</speak>" not in ssml_block:
+                logger.info("[astrbot_plugin_qaqaliyuntts] 提取结果不含 <speak>...</speak>，终止后续流程")
+                return ""
+            return ssml_block.strip()
         return llm_resp.completion_text
     
     def get_wav_by_tts(self, text: str) -> str:
