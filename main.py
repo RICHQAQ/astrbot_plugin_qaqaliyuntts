@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 import uuid
+from websocket._exceptions import WebSocketConnectionClosedException
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -25,6 +26,8 @@ class QAQAliyunttsPlugin(Star):
         if self.config is not None:
             print(f"[astrbot_plugin_qaqaliyuntts] 插件已加载 ，当前配置：{self.config}")
 
+        self.trigger_probability = self.config.get("trigger_probability", 0.3)
+        self.min_text_length = self.config.get("min_text_length", 2)
         self.enable = self.config.get("enable", False)
         if not self.enable:
             logger.info("[astrbot_plugin_qaqaliyuntts] 插件未启用")
@@ -38,9 +41,11 @@ class QAQAliyunttsPlugin(Star):
         self.voice_language = self.dashscope.get("voice_language", "")
 
         if self.dashscope_backend_type == "cosy":
-            self.voice_backend = SpeechSynthesizer(model=self.vioce_model, voice=self.dashscope.get("cosy_voice", ""), format=SpeechSynthesizerAudioFormat.WAV_44100HZ_MONO_16BIT)
+            self.cosy_voice = self.dashscope.get("cosy_voice", "")
+            self._cosy_lock = threading.Lock()
+            self._cosy_synthesizer = self._create_cosy_synthesizer()
         else:
-            self.voice_backend = QwenTTSBackend(api_key=self.dashscope_api_key, model=self.vioce_model, voice=self.dashscope.get("qwen_voice", ""))
+            self.qwen_voice = self.dashscope.get("qwen_voice", "")
 
         self.preprocess_config = self.config.get("preprocess", {})
         self.enable_preprocess = self.preprocess_config.get("enable", False)
@@ -59,13 +64,21 @@ class QAQAliyunttsPlugin(Star):
         """处理消息并进行语音合成。"""
         if not self.enable:
             return
+        if self.trigger_probability < 1.0:
+            import random
+            rand_val = random.random()
+            if rand_val > self.trigger_probability:
+                logger.info(f"[astrbot_plugin_qaqaliyuntts] 未触发语音合成，随机值：{rand_val:.4f}，触发概率：{self.trigger_probability}")
+                return
         result = event.get_result()
         if not result:
             return
         # chain = result.chain
         logger.info("[astrbot_plugin_qaqaliyuntts] 开始处理消息，进行语音合成")
         text = result.get_plain_text()
-        
+        if not text or len(text) < self.min_text_length:
+            logger.info(f"[astrbot_plugin_qaqaliyuntts] 文本长度不足，跳过语音合成，文本长度：{len(text) if text else 0}")
+            return
         if self.enable_preprocess:
             text = await self.clean_text_by_ai(text)
         logger.info(f"[astrbot_plugin_qaqaliyuntts] 预处理后的文本：{text}")
@@ -117,7 +130,18 @@ class QAQAliyunttsPlugin(Star):
     
     def get_wav_by_tts(self, text: str) -> str:
         """获取音频文件的完整路径。"""
-        audio_data = self.voice_backend.call(text)
+        if self.dashscope_backend_type == "cosy":
+            audio_data = None
+            with self._cosy_lock:
+                try:
+                    audio_data = self._cosy_synthesizer.call(text)
+                except WebSocketConnectionClosedException:
+                    # 连接断开时重建并重试一次
+                    self._cosy_synthesizer = self._create_cosy_synthesizer()
+                    audio_data = self._cosy_synthesizer.call(text)
+        else:
+            # todo: Qwen TTS
+            return ""
         if not audio_data:
             return ""
         file_name = f"{time.time()}_{uuid.uuid4()}.wav"
@@ -125,6 +149,13 @@ class QAQAliyunttsPlugin(Star):
         with open(output_path, 'wb') as f:
             f.write(audio_data)
         return output_path
+
+    def _create_cosy_synthesizer(self) -> SpeechSynthesizer:
+        return SpeechSynthesizer(
+            model=self.vioce_model,
+            voice=self.cosy_voice,
+            format=SpeechSynthesizerAudioFormat.WAV_44100HZ_MONO_16BIT,
+        )
 
 
 class QwenTTSBackend:
