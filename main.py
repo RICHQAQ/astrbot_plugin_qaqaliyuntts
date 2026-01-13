@@ -1,4 +1,5 @@
 import base64
+import io
 import re
 from os import path
 import os
@@ -6,6 +7,8 @@ from pathlib import Path
 import threading
 import time
 import uuid
+import wave
+from queue import Queue, Empty
 from pyexpat.errors import messages
 
 from websocket._exceptions import WebSocketConnectionClosedException
@@ -117,6 +120,12 @@ class QAQAliyunttsPlugin(Star):
             self._cosy_pool = SpeechSynthesizerObjectPool(10)
         else:
             self.qwen_voice = self.dashscope.get("qwen_voice", "")
+            self._qwen_pool = QwenTTSBackendPool(
+                max_size=10,
+                api_key=self.dashscope_api_key,
+                model=self.vioce_model,
+                voice=self.qwen_voice,
+            )
 
         self.preprocess_config = self.config.get("preprocess", {})
         self.enable_preprocess = self.preprocess_config.get("enable", False)
@@ -285,8 +294,21 @@ class QAQAliyunttsPlugin(Star):
                 if synthesizer is not None:
                     self._cosy_pool.return_synthesizer(synthesizer)
         else:
-            # todo: Qwen TTS
-            return ""
+            audio_data = None
+            backend = None
+            try:
+                backend = self._qwen_pool.borrow_backend()
+                audio_data = backend.call(text)
+            except WebSocketConnectionClosedException:
+                if backend is not None:
+                    self._qwen_pool.discard_backend(backend)
+                backend = self._qwen_pool.borrow_backend()
+                audio_data = backend.call(text)
+            finally:
+                if backend is not None:
+                    self._qwen_pool.return_backend(backend)
+            if audio_data:
+                audio_data = self._pcm_to_wav(audio_data, sample_rate=24000)
         if not audio_data:
             return ""
         file_name = f"{time.time()}_{uuid.uuid4()}.wav"
@@ -295,20 +317,77 @@ class QAQAliyunttsPlugin(Star):
             f.write(audio_data)
         return output_path
 
+    @staticmethod
+    def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int, channels: int = 1, sampwidth: int = 2) -> bytes:
+        with io.BytesIO() as buf:
+            with wave.open(buf, "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(sampwidth)
+                wf.setframerate(sample_rate)
+                wf.writeframes(pcm_bytes)
+            return buf.getvalue()
+
 class QwenTTSBackend:
     def __init__(self, api_key: str, model: str, voice: str):
         self.model = model
         self.voice = voice
+        self._callback = CollectBytesCallback()
+        if api_key:
+            dashscope.api_key = api_key
         self.qwen_tts_realtime = QwenTtsRealtime(
             model=self.model,
-            callback=CollectBytesCallback(),
+            callback=self._callback,
             # 以下为北京地域url，若使用新加坡地域的模型，需将url替换为：wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime
             url='wss://dashscope.aliyuncs.com/api-ws/v1/realtime'
         )
         self.qwen_tts_realtime.connect()
 
     def call(self, text: str):
-        pass
+        if not text:
+            return b""
+        self._callback.reset()
+        self.qwen_tts_realtime.update_session(
+            voice=self.voice or "Cherry",
+            response_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+            mode='server_commit',
+        )
+        self.qwen_tts_realtime.append_text(text)
+        self.qwen_tts_realtime.finish()
+        self._callback.wait_for_finished(timeout=30)
+        if not self._callback.complete_event.is_set():
+            return b""
+        return self._callback.audio_bytes
+
+
+class QwenTTSBackendPool:
+    def __init__(self, max_size: int, api_key: str, model: str, voice: str):
+        self._queue: Queue[QwenTTSBackend] = Queue(maxsize=max_size)
+        self._max_size = max_size
+        self._created = 0
+        self._lock = threading.Lock()
+        self._api_key = api_key
+        self._model = model
+        self._voice = voice
+
+    def borrow_backend(self) -> QwenTTSBackend:
+        try:
+            return self._queue.get_nowait()
+        except Empty:
+            with self._lock:
+                if self._created < self._max_size:
+                    self._created += 1
+                    return QwenTTSBackend(
+                        api_key=self._api_key,
+                        model=self._model,
+                        voice=self._voice,
+                    )
+            return self._queue.get()
+
+    def return_backend(self, backend: QwenTTSBackend) -> None:
+        self._queue.put(backend)
+
+    def discard_backend(self, backend: QwenTTSBackend) -> None:
+        del backend
 
 
 class CollectBytesCallback(QwenTtsRealtimeCallback):
@@ -347,3 +426,8 @@ class CollectBytesCallback(QwenTtsRealtimeCallback):
         self.complete_event.wait(timeout=timeout)
         if self._last_error:
             raise self._last_error
+
+    def reset(self) -> None:
+        self.complete_event.clear()
+        self._chunks.clear()
+        self._last_error = None
