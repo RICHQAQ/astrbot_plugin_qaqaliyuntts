@@ -14,7 +14,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 import dashscope
-from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer
+from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizerObjectPool
 from dashscope.audio.tts_v2 import AudioFormat as SpeechSynthesizerAudioFormat
 
 from astrbot.core.message.message_event_result import MessageChain
@@ -114,8 +114,7 @@ class QAQAliyunttsPlugin(Star):
 
         if self.dashscope_backend_type == "cosy":
             self.cosy_voice = self.dashscope.get("cosy_voice", "")
-            self._cosy_lock = threading.Lock()
-            self._cosy_synthesizer = self._create_cosy_synthesizer()
+            self._cosy_pool = SpeechSynthesizerObjectPool(10)
         else:
             self.qwen_voice = self.dashscope.get("qwen_voice", "")
 
@@ -267,13 +266,24 @@ class QAQAliyunttsPlugin(Star):
         """获取音频文件的完整路径。"""
         if self.dashscope_backend_type == "cosy":
             audio_data = None
-            with self._cosy_lock:
-                try:
-                    audio_data = self._cosy_synthesizer.call(text)
-                except WebSocketConnectionClosedException:
-                    # 连接断开时重建并重试一次
-                    self._cosy_synthesizer = self._create_cosy_synthesizer()
-                    audio_data = self._cosy_synthesizer.call(text)
+            synthesizer = self._cosy_pool.borrow_synthesizer(
+                model=self.vioce_model,
+                voice=self.cosy_voice,
+                format=SpeechSynthesizerAudioFormat.WAV_44100HZ_MONO_16BIT,
+            )
+            try:
+                audio_data = synthesizer.call(text)
+            except WebSocketConnectionClosedException:
+                self._cosy_pool.return_synthesizer(synthesizer)
+                synthesizer = self._cosy_pool.borrow_synthesizer(
+                    model=self.vioce_model,
+                    voice=self.cosy_voice,
+                    format=SpeechSynthesizerAudioFormat.WAV_44100HZ_MONO_16BIT,
+                )
+                audio_data = synthesizer.call(text)
+            finally:
+                if synthesizer is not None:
+                    self._cosy_pool.return_synthesizer(synthesizer)
         else:
             # todo: Qwen TTS
             return ""
@@ -284,14 +294,6 @@ class QAQAliyunttsPlugin(Star):
         with open(output_path, 'wb') as f:
             f.write(audio_data)
         return output_path
-
-    def _create_cosy_synthesizer(self) -> SpeechSynthesizer:
-        return SpeechSynthesizer(
-            model=self.vioce_model,
-            voice=self.cosy_voice,
-            format=SpeechSynthesizerAudioFormat.WAV_44100HZ_MONO_16BIT,
-        )
-
 
 class QwenTTSBackend:
     def __init__(self, api_key: str, model: str, voice: str):
