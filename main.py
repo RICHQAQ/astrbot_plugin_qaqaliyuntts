@@ -216,7 +216,20 @@ class QAQAliyunttsPlugin(Star):
         
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
-        pass
+        if not getattr(self, "enable", False):
+            return
+        if getattr(self, "_qwen_pool", None):
+            try:
+                self._qwen_pool.close_all()
+                logger.info("[astrbot_plugin_qaqaliyuntts] Qwen 连接池已关闭")
+            except Exception as e:
+                logger.warning(f"[astrbot_plugin_qaqaliyuntts] 关闭 Qwen 连接池失败：{e}")
+        if getattr(self, "_cosy_pool", None):
+            try:
+                self._cosy_pool.shutdown()
+                logger.info("[astrbot_plugin_qaqaliyuntts] Cosy 连接池已关闭")
+            except Exception as e:
+                logger.warning(f"[astrbot_plugin_qaqaliyuntts] 关闭 Cosy 连接池失败：{e}")
 
     async def clean_text_by_ai(self, text: str, **kwargs) -> str:
         """使用 LLM 对文本进行预处理，返回处理后的文本。"""
@@ -358,6 +371,15 @@ class QwenTTSBackend:
             return b""
         return self._callback.audio_bytes
 
+    def close(self) -> None:
+        try:
+            if hasattr(self.qwen_tts_realtime, "close"):
+                self.qwen_tts_realtime.close()
+            elif hasattr(self.qwen_tts_realtime, "disconnect"):
+                self.qwen_tts_realtime.disconnect()
+        except Exception as e:
+            logger.warning(f"[astrbot_plugin_qaqaliyuntts] 关闭 Qwen 实例失败：{e}")
+
 
 class QwenTTSBackendPool:
     def __init__(self, max_size: int, api_key: str, model: str, voice: str):
@@ -368,6 +390,7 @@ class QwenTTSBackendPool:
         self._api_key = api_key
         self._model = model
         self._voice = voice
+        self._all: list[QwenTTSBackend] = []
 
     def borrow_backend(self) -> QwenTTSBackend:
         try:
@@ -376,11 +399,13 @@ class QwenTTSBackendPool:
             with self._lock:
                 if self._created < self._max_size:
                     self._created += 1
-                    return QwenTTSBackend(
+                    backend = QwenTTSBackend(
                         api_key=self._api_key,
                         model=self._model,
                         voice=self._voice,
                     )
+                    self._all.append(backend)
+                    return backend
             return self._queue.get()
 
     def return_backend(self, backend: QwenTTSBackend) -> None:
@@ -388,6 +413,14 @@ class QwenTTSBackendPool:
 
     def discard_backend(self, backend: QwenTTSBackend) -> None:
         del backend
+
+    def close_all(self) -> None:
+        with self._lock:
+            backends = list(self._all)
+            self._all.clear()
+            self._created = 0
+        for backend in backends:
+            backend.close()
 
 
 class CollectBytesCallback(QwenTtsRealtimeCallback):
