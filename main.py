@@ -6,6 +6,8 @@ from pathlib import Path
 import threading
 import time
 import uuid
+from pyexpat.errors import messages
+
 from websocket._exceptions import WebSocketConnectionClosedException
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
@@ -14,6 +16,9 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 import dashscope
 from dashscope.audio.tts_v2 import VoiceEnrollmentService, SpeechSynthesizer
 from dashscope.audio.tts_v2 import AudioFormat as SpeechSynthesizerAudioFormat
+
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 import astrbot.api.message_components as Comp
 from dashscope.audio.qwen_tts_realtime import QwenTtsRealtime, QwenTtsRealtimeCallback, AudioFormat
@@ -140,14 +145,13 @@ class QAQAliyunttsPlugin(Star):
         if user_text:
             self.hist[sid].append(("user", send))
 
-    @filter.on_decorating_result()
-    async def send_tts(self, event: AstrMessageEvent):
+    @filter.on_llm_response()
+    async def send_tts(self, event: AstrMessageEvent, resp: LLMResponse):
         """处理消息并进行语音合成。"""
         sid = event.message_obj.session_id
-        result = event.get_result()
-        if not result:
+        text = resp.completion_text
+        if text is None or text == "":
             return
-        text = result.get_plain_text()
         send = (event.message_obj.sender.user_id, event.message_obj.sender.nickname, text)
         self.hist[sid].append(("robot", send))
         if not self.enable:
@@ -179,7 +183,9 @@ class QAQAliyunttsPlugin(Star):
         if not os.path.exists(wav_path):
             logger.error(f"[astrbot_plugin_qaqaliyuntts] 语音合成失败，音频文件不存在：{wav_path}")
             return
-        result.chain.append(Comp.Record(file=wav_path, url=wav_path))
+        m = MessageChain()
+        m.chain.append(Comp.Record(file=wav_path, url=wav_path))
+        await event.send(m)
 
     @filter.after_message_sent()
     async def cleanup_audios(self, event: AstrMessageEvent):
